@@ -1,27 +1,31 @@
 #![no_std]
 #![no_main]
 
-use ahrs::Madgwick;
-use cortex_m::asm;
-use cortex_m_rt::entry;
-use cortex_m_semihosting::hprintln;
 use l3gd20::{L3gd20, Odr};
 use lsm303dlhc::{AccelOdr, Lsm303dlhc, MagOdr};
+
+use ahrs::Madgwick;
+use ahrs::Ahrs;
+
 use panic_halt as _;
-use stm32f3xx_hal::{self as hal, pac, prelude::*};
+
+use cortex_m_rt::entry;
+use cortex_m_rt::exception;
+
+use cortex_m::{asm};
+use cortex_m::peripheral::SYST;
+
+use stm32f3xx_hal::{self as hal, pac, time, prelude::*};
 use stm32f3xx_hal::i2c::I2c;
 use stm32f3xx_hal::spi::Spi;
-use stm32f3xx_hal::time;
 use crate::pac::{I2C1, Peripherals};
-//use embedded_hal::blocking::delay::DelayMs;
-use cortex_m::peripheral::SYST;
 
 use core::f32::consts::PI;
 use core::sync::atomic::{AtomicU32, Ordering};
-use ahrs::Ahrs;
-use nalgebra::{Vector3, UnitQuaternion, Quaternion};
+use cortex_m::peripheral::syst::SystClkSource;
+use cortex_m_semihosting::hprintln;
 
-use cortex_m_rt::exception;
+use nalgebra::{Vector3, UnitQuaternion, Quaternion};
 
 
 // Magnetometer calibration parameters
@@ -44,31 +48,36 @@ const K_AR: f32 = 8.75e-3 * PI / 180.; // LSB -> rad/s
 // Number of samples to use for gyroscope calibration
 const NSAMPLES: i32 = 256;
 
-static counter: AtomicU32 = AtomicU32::new(0);
+static systick_reload: AtomicU32 = AtomicU32::new(0);
 
 #[entry]
 fn main() -> ! {
 // Get access to the core peripherals from the cortex-m crate
-    let mut cp = cortex_m::Peripherals::take().unwrap();
 
-    cp.SYST.set_reload(SYST::get_ticks_per_10ms());
-    cp.SYST.clear_current();
-    cp.SYST.enable_counter();
-    cp.SYST.enable_interrupt();
-
+    hprintln!("get_ticks_per_10ms {}", SYST::get_ticks_per_10ms());
 
     let dp = pac::Peripherals::take().unwrap();
-    //let mut sys = dp.SYSCFG.constrain();
-    //sys.set_re
+
     let mut rcc = dp.RCC.constrain();
     let mut flash = dp.FLASH.constrain();
 
     let clocks = rcc
         .cfgr
+        .use_pll()
         .use_hse(8.MHz())
-        .sysclk(48.MHz())
+        .sysclk(72.MHz())
         .pclk1(24.MHz())
         .freeze(&mut flash.acr);
+
+    let mut cp = cortex_m::Peripherals::take().unwrap();
+
+    cp.SYST.set_clock_source(SystClkSource::External);
+    cp.SYST.set_reload(0xFFFFFFFF);
+    cp.SYST.clear_current();
+    cp.SYST.enable_counter();
+    cp.SYST.enable_interrupt();
+
+    hprintln!("get_ticks_per_10ms {} {} {:?}", SYST::get_ticks_per_10ms(), SYST::has_reference_clock(), clocks);
 
     let mut gpioe = dp.GPIOE.split(&mut rcc.ahb);
 
@@ -106,7 +115,7 @@ fn main() -> ! {
     let mut nss = gpioe.pe3.into_push_pull_output(&mut gpioe.moder, &mut gpioe.otyper);
     nss.set_high();
 
-    let mut spi = Spi::new(dp.SPI1, (sck, miso, mosi), 3.MHz(), clocks, &mut rcc.apb2);
+    let mut spi = Spi::new(dp.SPI1, (sck, miso, mosi), 18.MHz(), clocks, &mut rcc.apb2);
     let mut l3gd20 = L3gd20::new(spi, nss).unwrap();
 
     l3gd20.set_odr(Odr::Hz190).unwrap();
@@ -138,16 +147,31 @@ fn main() -> ! {
 
     let mut loop_count = 0;
 
-    let mut last = counter.load(Ordering::SeqCst);
+    let mut last = SYST::get_current();
+
+    let mut sum_lsm303dlhc = 0;
+    let mut sum_l3gd20 = 0;
+    let mut sum_lsm303dlhc = 0;
+    let mut sum_calib = 0;
+    let mut sum_ahrs = 0;
+    let mut sum_euler = 0;
     loop {
+
         loop_count += 1;
-        //hprintln!("Hello, world! {}", count).unwrap();
 
-
+        let ms = SYST::get_current();
         let m = lsm303dlhc.mag().unwrap();
-        let ar = l3gd20.gyro().unwrap();
-        let g = lsm303dlhc.accel().unwrap();
+        sum_lsm303dlhc = diff_clock(SYST::get_current(), ms);
 
+        let ms = SYST::get_current();
+        let ar = l3gd20.gyro().unwrap();
+        sum_l3gd20 = diff_clock(SYST::get_current(), ms);
+
+        let ms = SYST::get_current();
+        let g = lsm303dlhc.accel().unwrap();
+        sum_lsm303dlhc = diff_clock(SYST::get_current(), ms);
+
+        let ms = SYST::get_current();
         let m_x = (f32::from(m.x) - M_BIAS_X) / M_SCALE_X;
         let m_y = (f32::from(m.y) - M_BIAS_Y) / M_SCALE_Y;
         let m_z = (f32::from(m.z) - M_BIAS_Z) / M_SCALE_Z;
@@ -177,29 +201,56 @@ fn main() -> ! {
             -g_x,
             g_z,
         );
+        sum_calib = diff_clock(SYST::get_current(), ms);
 
+        let ms = SYST::get_current();
         let quat = ahrs.update(
                 &(gyroscope * (PI / 180.0)),
                 &accelerometer,
                 &magnetometer,
             )
             .unwrap();
-        let (roll, pitch, yaw) = quat.euler_angles();
+        sum_ahrs = diff_clock(SYST::get_current(), ms);
 
-        let current = counter.load(Ordering::SeqCst);
-        if current - last >= 100{
+        let ms = SYST::get_current();
+        let (roll, pitch, yaw) = quat.euler_angles();
+        sum_euler = diff_clock(SYST::get_current(), ms);
+
+        let current = SYST::get_current();
+        if diff_clock(current, last) >= 1_000 * 72{
             last = current;
-            hprintln!("{} {} - roll {} pitch {} yaw {}", counter.load(Ordering::SeqCst), loop_count, roll, pitch, yaw);
+            //hprintln!("{} {} - roll {} pitch {} yaw {}", systick_reload.load(Ordering::SeqCst), loop_count, roll, pitch, yaw);
+            hprintln!("{} {}", systick_reload.load(Ordering::SeqCst), SYST::get_ticks_per_10ms());
             led.toggle().unwrap();
+
+            hprintln!("{} {} {} {} {} {}",
+                sum_lsm303dlhc,
+                sum_l3gd20,
+                sum_lsm303dlhc,
+                sum_calib,
+                sum_ahrs,
+                sum_euler);
+
+            sum_lsm303dlhc = 0;
+            sum_l3gd20 = 0;
+            sum_lsm303dlhc = 0;
+            sum_calib = 0;
+            sum_ahrs = 0;
+            sum_euler = 0;
         }
-        //asm::delay(8_000_000/200);
+        //hprintln!("loop {} {} {}", systick_reload.load(Ordering::SeqCst), SYST::get_current(), micros());
+        //asm::delay(72_000_000/1000);
 
     }
 }
 
-#[exception]
-fn SysTick() -> () {
-    counter.fetch_add(1, Ordering::SeqCst);
+fn diff_clock(a:u32, b:u32) -> u32 {
+    b.wrapping_sub(a) & 0x00FF_FFFF
 }
 
-//monitor arm semihosting enable
+#[exception]
+fn SysTick() -> () {
+    systick_reload.fetch_add(1, Ordering::SeqCst);
+}
+
+// monitor arm semihosting enable
