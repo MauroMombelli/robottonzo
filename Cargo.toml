@@ -1,42 +1,39 @@
 [package]
-authors = ["mauro <lestofante88@gmail.com>"]
+authors = ["lesto <lestofante88@gmail.com>"]
 edition = "2018"
 readme = "README.md"
 name = "robottonzo"
 version = "0.1.0"
 
 [dependencies]
-cortex-m = "*"
-cortex-m-rt = "*"
+defmt = "0.3.0"
+defmt-rtt = "0.4.0"
+panic-probe = { version = "0.3.0", features = ["print-defmt"] }
+
+cortex-m = "0.7.3"
+cortex-m-rt = "0.7.0"
 cortex-m-semihosting = "*"
-stm32f3xx-hal = { version = "*", features = ["ld", "rt", "stm32f303xc"] }
-panic-halt = "*"
-lsm303dlhc = "*"
-l3gd20 = "*"
-ahrs = { version = "*",  default-features = false }
 
-[dependencies.nalgebra]
-version = "0.30"
-default-features = false
+# Change this import as required for your MCU.
+stm32-hal2 = { version = "1.5.4", features = ["f303", "f3rt"]}
 
-# Uncomment for the panic example.
-# panic-itm = "0.4.1"
-
-# Uncomment for the allocator example.
-# alloc-cortex-m = "0.4.0"
-
-# Uncomment for the device example.
-# Update `memory.x`, set target to `thumbv7em-none-eabihf` in `.cargo/config`,
-# and then use `cargo build --examples device` to build it.
-# [dependencies.stm32f3]
-# features = ["stm32f303", "rt"]
-# version = "0.7.1"
-
-# this lets you use `cargo fix`!
 [[bin]]
-name = "robottonzo"
+name = "robottonzo-blocking"
 test = false
 bench = false
+path = "src/main_blocking.rs"
+
+[[bin]]
+name = "robottonzo-interrupt"
+test = false
+bench = false
+path = "src/main_interrupt.rs"
+
+[[bin]]
+name = "robottonzo-dma"
+test = false
+bench = false
+path = "src/main_dma.rs"
 
 [profile.release]
 codegen-units = 1 # better optimizations
